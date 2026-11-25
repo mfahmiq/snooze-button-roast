@@ -121,13 +121,20 @@ MAX_ENTRY_CHARS = 200
 
 
 def validate(entry):
-    """Check the entry against the gate before writing anything.
+    """Check the entry against the competition gate before writing.
 
-    The sealed scorer accepts UTF-8 text of 1 to 200 characters that
-    is not only whitespace. We enforce the same three conditions here
-    so a broken entry fails loudly at build time instead of silently
-    at grading time. Returns the entry unchanged when all three hold;
-    raises ``ValueError`` otherwise.
+    The sealed scorer accepts UTF-8 text of 1 to 200 characters on a
+    single line. We enforce the same gate here so a broken entry fails
+    loudly at build time instead of silently at grading time. Every
+    failure raises ``ValueError``; a valid entry is returned unchanged.
+
+    Checks, in order:
+    1. ``entry`` is a ``str``.
+    2. Length is 1..200 characters (not bytes -- the cap counts
+       characters, and the em dash is one character).
+    3. Single line: no ``\\n`` or ``\\r`` anywhere.
+    4. Not empty and not only whitespace.
+    5. UTF-8 encodable (``entry.encode("utf-8")`` must succeed).
     """
     if not isinstance(entry, str):
         raise ValueError("entry must be a string, got %r" % type(entry).__name__)
@@ -136,8 +143,14 @@ def validate(entry):
             "entry is %d characters, outside the 1..%d gate"
             % (len(entry), MAX_ENTRY_CHARS)
         )
+    if "\n" in entry or "\r" in entry:
+        raise ValueError("entry must be a single line (no newline characters)")
     if not entry.strip():
-        raise ValueError("entry must not be only whitespace")
+        raise ValueError("entry must not be empty or only whitespace")
+    try:
+        entry.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("entry is not UTF-8 encodable: %s" % exc)
     return entry
 
 
@@ -156,9 +169,9 @@ def output_path():
 def write_entry(path, entry):
     """Write the entry verbatim, plus one trailing newline.
 
-    Split-write pattern: the line itself is written first, then the
-    single trailing LF as a separate write, so the file's bytes are
-    exactly ``entry + "\\n"`` -- byte-identical to the checked-in
+    The line itself is written first, then the single trailing LF as a
+    separate write, so the file's bytes are exactly
+    ``entry + "\\n"`` -- byte-identical to the checked-in
     ``entry.txt``. UTF-8 encoding (so the em dash in the punchline
     round-trips exactly), a single LF newline (``newline="\\n"`` -- a
     platform default could add a stray CR and change the file's
@@ -177,21 +190,35 @@ def write_entry(path, entry):
 
 
 def main(argv=None):
-    """Validate the entry, write it, and report what was written.
+    """Validate the entry, write it, and print it to stdout.
 
-    The flow is linear -- validate, resolve the path, write, confirm
-    -- because there is nothing to branch on: the entry is fixed, the
+    The flow is linear -- validate, resolve the path, write, print --
+    because there is nothing to branch on: the entry is fixed, the
     output is fixed, and any failure is a build error, not a runtime
     decision. ``argv`` is accepted and ignored so a stray argument
-    can never change the output. On success this prints the path and
-    the character count (a one-line receipt for the build log) and
+    can never change the output. On success this prints the entry
+    itself to stdout (so stdout is the entry, byte for byte) and
     exits 0; on failure the exception propagates and the process
     exits non-zero, so a broken build is never mistaken for success.
     """
     entry = validate(ENTRY)
     path = output_path()
     write_entry(path, entry)
-    print("wrote %s (%d characters)" % (path, len(entry)))
+    # Read-back verification: re-read what was just written and compare
+    # it byte for byte against the entry. If the file on disk differs
+    # from the validated entry (truncation, encoding slip, stray CR),
+    # fail loudly instead of letting a corrupt file reach the judge.
+    with open(path, "rb") as handle:
+        written = handle.read()
+    if written != entry.encode("utf-8") + b"\n":
+        print(
+            "error: read-back mismatch in %s "
+            "(wrote %d bytes, expected %d bytes)"
+            % (path, len(written), len(entry.encode("utf-8")) + 1),
+            file=sys.stderr,
+        )
+        return 1
+    print(entry)
     return 0
 
 
